@@ -1,0 +1,50 @@
+/* Subtitle overlay styles */
+#realtime-subtitle-container {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483647;
+  pointer-events: none;
+  width: 90%;
+  max-width: 900px;
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+#realtime-subtitle-container.bottom {
+  bottom: 60px;
+}
+
+#realtime-subtitle-container.top {
+  top: 60px;
+}
+
+#realtime-subtitle-text {
+  display: inline-block;
+  padding: 12px 24px;
+  background: rgba(0, 0, 0, 0.85);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.4;
+  border-radius: 8px;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  max-width: 100%;
+  word-wrap: break-word;
+}
+
+#realtime-subtitle-text.interim {
+  color: #b0b0b0;
+}
+
+#realtime-subtitle-text:empty {
+  display: none;
+}
+
+/* Hide when no subtitles */
+#realtime-subtitle-container.hidden {
+  opacity: 0;
+  visibility: hidden;
+}
