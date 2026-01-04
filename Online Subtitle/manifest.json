@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Realtime Subtitles",
-  "version": "1.0.1",
-  "description": "Generate real-time subtitles for any video playing in your browser",
+  "version": "2.0.0",
+  "description": "Generate real-time subtitles from video audio using Deepgram AI",
   "permissions": [
     "activeTab",
     "tabCapture",

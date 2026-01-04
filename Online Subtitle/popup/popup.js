@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
+  const apiKeyInput = document.getElementById('apiKeyInput');
   const languageSelect = document.getElementById('languageSelect');
   const fontSizeSlider = document.getElementById('fontSizeSlider');
   const fontSizeValue = document.getElementById('fontSizeValue');
@@ -8,9 +9,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   const statusIndicator = document.getElementById('statusIndicator');
   const statusText = document.getElementById('statusText');
 
-  // Load saved settings
-  const settings = await chrome.storage.local.get(['language', 'fontSize', 'position', 'isActive']);
+  // Reset isActive on popup open
+  await chrome.storage.local.set({ isActive: false });
 
+  // Load saved settings
+  const settings = await chrome.storage.local.get(['apiKey', 'language', 'fontSize', 'position']);
+
+  if (settings.apiKey) apiKeyInput.value = settings.apiKey;
   if (settings.language) languageSelect.value = settings.language;
   if (settings.fontSize) {
     fontSizeSlider.value = settings.fontSize;
@@ -18,9 +23,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (settings.position) positionSelect.value = settings.position;
 
-  if (settings.isActive) {
-    updateStatus(true);
-  }
+  // Ensure buttons are in correct initial state
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  // API Key input
+  apiKeyInput.addEventListener('change', async (e) => {
+    await chrome.storage.local.set({ apiKey: e.target.value });
+  });
 
   // Font size slider
   fontSizeSlider.addEventListener('input', async (e) => {
@@ -34,7 +44,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   languageSelect.addEventListener('change', async (e) => {
     const language = e.target.value;
     await chrome.storage.local.set({ language });
-    sendToContentScript({ type: 'UPDATE_SETTINGS', language });
   });
 
   // Position select
@@ -46,15 +55,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Start button
   startBtn.addEventListener('click', async () => {
+    const apiKey = apiKeyInput.value.trim();
+
+    if (!apiKey) {
+      updateStatus(false, 'Please enter API key');
+      apiKeyInput.focus();
+      return;
+    }
+
+    // Save API key
+    await chrome.storage.local.set({ apiKey });
+
     const settings = {
+      apiKey,
       language: languageSelect.value,
       fontSize: fontSizeSlider.value,
       position: positionSelect.value
     };
 
+    // Disable button immediately
+    startBtn.disabled = true;
+    statusText.textContent = 'Starting...';
+
     await chrome.storage.local.set({ ...settings, isActive: true });
 
-    // Send message to background script to start capture
+    // Send message to background script
     chrome.runtime.sendMessage({ type: 'START_CAPTURE', settings }, (response) => {
       if (response && response.success) {
         updateStatus(true);
@@ -81,7 +106,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       stopBtn.disabled = true;
     } else if (active) {
       statusIndicator.className = 'status-indicator active';
-      statusText.textContent = 'Listening...';
+      statusText.textContent = 'Transcribing...';
       startBtn.disabled = true;
       stopBtn.disabled = false;
     } else {

@@ -1,10 +1,10 @@
-// Background service worker
+// Background service worker for Deepgram transcription
 let activeTabId = null;
 let offscreenDocumentCreated = false;
 
-// Listen for messages from popup and offscreen
+// Listen for messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('Background received message:', message.type);
+  console.log('Background received:', message.type);
 
   if (message.type === 'START_CAPTURE') {
     startCapture(message.settings)
@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error('Start capture error:', error);
         sendResponse({ success: false, error: error.message });
       });
-    return true; // Keep channel open for async response
+    return true;
   }
 
   if (message.type === 'STOP_CAPTURE') {
@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Forward transcription results from offscreen to content script
   if (message.type === 'TRANSCRIPTION_RESULT' && activeTabId) {
-    console.log('Forwarding transcription to tab:', activeTabId, message.text);
+    console.log('Forwarding to tab:', message.text);
     chrome.tabs.sendMessage(activeTabId, {
       type: 'SHOW_SUBTITLE',
       text: message.text,
@@ -35,7 +35,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'TRANSCRIPTION_ERROR') {
     console.error('Transcription error:', message.error);
-    // Notify content script to show error
     if (activeTabId) {
       chrome.tabs.sendMessage(activeTabId, {
         type: 'SHOW_SUBTITLE',
@@ -45,13 +44,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  if (message.type === 'RECOGNITION_STARTED') {
-    console.log('Recognition started successfully');
+  if (message.type === 'TRANSCRIPTION_STARTED') {
+    console.log('Transcription started successfully');
   }
 });
 
 async function startCapture(settings) {
-  console.log('Starting capture with settings:', settings);
+  console.log('Starting capture...');
+
+  // Stop any existing capture
+  await stopCapture();
 
   // Get active tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -64,79 +66,93 @@ async function startCapture(settings) {
   try {
     await chrome.tabs.sendMessage(activeTabId, {
       type: 'INIT_SUBTITLES',
-      settings
+      settings: {
+        fontSize: settings.fontSize,
+        position: settings.position
+      }
     });
     console.log('Content script initialized');
   } catch (e) {
-    console.log('Content script may not be ready, injecting...');
-    // Content script might not be loaded yet, that's ok
+    console.log('Content script init error:', e.message);
   }
 
-  // Create offscreen document for speech recognition
+  // Create offscreen document
   await ensureOffscreenDocument();
-  console.log('Offscreen document ready');
 
-  // Start tab capture
+  // Get tab capture stream ID
   const streamId = await chrome.tabCapture.getMediaStreamId({
     targetTabId: activeTabId
   });
   console.log('Got stream ID:', streamId);
 
-  // Small delay to ensure offscreen document is ready
-  await new Promise(resolve => setTimeout(resolve, 100));
+  // Small delay for offscreen document
+  await new Promise(resolve => setTimeout(resolve, 200));
 
-  // Send stream ID to offscreen document
+  // Start transcription
   chrome.runtime.sendMessage({
-    type: 'START_RECOGNITION',
+    type: 'START_TRANSCRIPTION',
     streamId,
     settings
   });
 
-  console.log('Sent START_RECOGNITION to offscreen');
+  console.log('Transcription request sent');
 }
 
 async function stopCapture() {
   console.log('Stopping capture...');
 
-  // Stop recognition in offscreen document
-  chrome.runtime.sendMessage({ type: 'STOP_RECOGNITION' });
-
-  // Hide subtitles
-  if (activeTabId) {
-    chrome.tabs.sendMessage(activeTabId, { type: 'STOP_SUBTITLES' }).catch(() => {});
+  // Stop transcription
+  try {
+    chrome.runtime.sendMessage({ type: 'STOP_TRANSCRIPTION' });
+  } catch (e) {
+    // Ignore
   }
+
+  // Stop subtitles
+  if (activeTabId) {
+    try {
+      await chrome.tabs.sendMessage(activeTabId, { type: 'STOP_SUBTITLES' });
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  // Close offscreen document
+  await closeOffscreenDocument();
 
   activeTabId = null;
 }
 
 async function ensureOffscreenDocument() {
-  if (offscreenDocumentCreated) {
-    console.log('Offscreen document already exists');
-    return;
-  }
-
-  const existingContexts = await chrome.runtime.getContexts({
+  const contexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT']
   });
 
-  if (existingContexts.length > 0) {
-    console.log('Found existing offscreen document');
-    offscreenDocumentCreated = true;
+  if (contexts.length > 0) {
+    console.log('Offscreen document exists');
     return;
   }
 
-  console.log('Creating new offscreen document...');
+  console.log('Creating offscreen document...');
   await chrome.offscreen.createDocument({
     url: 'offscreen/offscreen.html',
-    reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'],
-    justification: 'Speech recognition requires audio access from tab'
+    reasons: ['USER_MEDIA'],
+    justification: 'Tab audio capture for transcription'
   });
-
-  offscreenDocumentCreated = true;
   console.log('Offscreen document created');
 }
 
-// Clean up on extension unload
-chrome.runtime.onSuspend?.addListener(() => {
-  stopCapture();
-});
+async function closeOffscreenDocument() {
+  try {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT']
+    });
+
+    if (contexts.length > 0) {
+      await chrome.offscreen.closeDocument();
+      console.log('Offscreen document closed');
+    }
+  } catch (e) {
+    console.log('Close offscreen error:', e.message);
+  }
+}

@@ -1,23 +1,28 @@
-// Offscreen document for speech recognition
-let recognition = null;
+// Offscreen document for Deepgram real-time transcription
 let mediaStream = null;
 let audioContext = null;
-let isRecognizing = false;
+let websocket = null;
+let processor = null;
+let isTranscribing = false;
+
+console.log('Offscreen document loaded');
 
 // Listen for messages from background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'START_RECOGNITION') {
-    startRecognition(message.streamId, message.settings);
+  console.log('Offscreen received:', message.type);
+
+  if (message.type === 'START_TRANSCRIPTION') {
+    startTranscription(message.streamId, message.settings);
   }
 
-  if (message.type === 'STOP_RECOGNITION') {
-    stopRecognition();
+  if (message.type === 'STOP_TRANSCRIPTION') {
+    stopTranscription();
   }
 });
 
-async function startRecognition(streamId, settings) {
+async function startTranscription(streamId, settings) {
   try {
-    console.log('Starting recognition with streamId:', streamId);
+    console.log('Starting Deepgram transcription...');
 
     // Get media stream from tab capture
     mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -29,133 +34,86 @@ async function startRecognition(streamId, settings) {
       }
     });
 
-    console.log('Media stream obtained:', mediaStream);
+    console.log('Tab audio stream obtained');
 
-    // Create audio context to keep the stream active
-    audioContext = new AudioContext();
+    // Set up audio context for processing
+    audioContext = new AudioContext({ sampleRate: 16000 });
     const source = audioContext.createMediaStreamSource(mediaStream);
 
-    // Create a destination to keep audio playing (needed for speech recognition to work)
-    const destination = audioContext.createMediaStreamDestination();
-    source.connect(destination);
+    // Create script processor for audio data
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
 
-    // Also connect to speakers so user can hear the audio
-    source.connect(audioContext.destination);
+    // Connect to Deepgram WebSocket
+    const language = settings.language || 'en';
+    const wsUrl = `wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&language=${language}&punctuate=true&interim_results=true`;
 
-    // Initialize Web Speech API
-    // Note: Web Speech API uses the system microphone, not the tab audio directly
-    // So we need to use a workaround - play through speakers and use mic to capture
-    // OR use the microphone directly to capture audio from speakers
+    websocket = new WebSocket(wsUrl, ['token', settings.apiKey]);
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    websocket.onopen = () => {
+      console.log('Deepgram WebSocket connected');
+      isTranscribing = true;
 
-    if (!SpeechRecognition) {
-      throw new Error('Speech recognition not supported');
-    }
-
-    recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = settings.language || 'en-US';
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      console.log('Speech recognition started successfully');
       chrome.runtime.sendMessage({
-        type: 'RECOGNITION_STARTED'
+        type: 'TRANSCRIPTION_STARTED'
+      });
+
+      // Process audio data
+      processor.onaudioprocess = (e) => {
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcmData = convertFloat32ToInt16(inputData);
+          websocket.send(pcmData.buffer);
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+    };
+
+    websocket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.channel && data.channel.alternatives && data.channel.alternatives[0]) {
+          const transcript = data.channel.alternatives[0].transcript;
+          const isFinal = data.is_final;
+
+          if (transcript && transcript.trim()) {
+            console.log('Transcript:', transcript, 'Final:', isFinal);
+
+            chrome.runtime.sendMessage({
+              type: 'TRANSCRIPTION_RESULT',
+              text: transcript,
+              isInterim: !isFinal
+            });
+          }
+        }
+      } catch (e) {
+        console.error('Error parsing Deepgram response:', e);
+      }
+    };
+
+    websocket.onerror = (error) => {
+      console.error('Deepgram WebSocket error:', error);
+      chrome.runtime.sendMessage({
+        type: 'TRANSCRIPTION_ERROR',
+        error: 'Connection error. Check your API key.'
       });
     };
 
-    recognition.onresult = (event) => {
-      let interimTranscript = '';
-      let finalTranscript = '';
+    websocket.onclose = (event) => {
+      console.log('Deepgram WebSocket closed:', event.code, event.reason);
 
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript;
-
-        if (event.results[i].isFinal) {
-          finalTranscript += transcript;
-        } else {
-          interimTranscript += transcript;
-        }
-      }
-
-      console.log('Transcription result:', { finalTranscript, interimTranscript });
-
-      // Send final results
-      if (finalTranscript) {
-        chrome.runtime.sendMessage({
-          type: 'TRANSCRIPTION_RESULT',
-          text: finalTranscript,
-          isInterim: false
-        });
-      }
-
-      // Send interim results
-      if (interimTranscript) {
-        chrome.runtime.sendMessage({
-          type: 'TRANSCRIPTION_RESULT',
-          text: interimTranscript,
-          isInterim: true
-        });
-      }
-    };
-
-    recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event.error);
-
-      // Restart on recoverable errors
-      if (event.error === 'no-speech' || event.error === 'aborted') {
-        if (isRecognizing) {
-          setTimeout(() => {
-            if (isRecognizing && recognition) {
-              try {
-                recognition.start();
-                console.log('Restarting recognition after error:', event.error);
-              } catch (e) {
-                console.log('Could not restart:', e.message);
-              }
-            }
-          }, 500);
-        }
-      } else if (event.error === 'not-allowed') {
+      if (isTranscribing && event.code !== 1000) {
         chrome.runtime.sendMessage({
           type: 'TRANSCRIPTION_ERROR',
-          error: 'Microphone access denied. Please allow microphone permission.'
-        });
-      } else {
-        chrome.runtime.sendMessage({
-          type: 'TRANSCRIPTION_ERROR',
-          error: event.error
+          error: event.reason || 'Connection closed unexpectedly'
         });
       }
     };
-
-    recognition.onend = () => {
-      console.log('Speech recognition ended');
-      // Restart recognition if still active
-      if (isRecognizing) {
-        setTimeout(() => {
-          if (isRecognizing && recognition) {
-            try {
-              recognition.start();
-              console.log('Restarting recognition after end');
-            } catch (e) {
-              console.log('Could not restart after end:', e.message);
-            }
-          }
-        }, 300);
-      }
-    };
-
-    // Start recognition
-    isRecognizing = true;
-    recognition.start();
-
-    console.log('Speech recognition initialization complete');
 
   } catch (error) {
-    console.error('Failed to start recognition:', error);
+    console.error('Failed to start transcription:', error);
     chrome.runtime.sendMessage({
       type: 'TRANSCRIPTION_ERROR',
       error: error.message
@@ -163,17 +121,35 @@ async function startRecognition(streamId, settings) {
   }
 }
 
-function stopRecognition() {
-  console.log('Stopping recognition...');
-  isRecognizing = false;
+function convertFloat32ToInt16(float32Array) {
+  const int16Array = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return int16Array;
+}
 
-  if (recognition) {
+function stopTranscription() {
+  console.log('Stopping transcription...');
+  isTranscribing = false;
+
+  if (websocket) {
     try {
-      recognition.stop();
+      websocket.close(1000, 'User stopped');
     } catch (e) {
       // Ignore
     }
-    recognition = null;
+    websocket = null;
+  }
+
+  if (processor) {
+    try {
+      processor.disconnect();
+    } catch (e) {
+      // Ignore
+    }
+    processor = null;
   }
 
   if (audioContext) {
@@ -190,5 +166,5 @@ function stopRecognition() {
     mediaStream = null;
   }
 
-  console.log('Speech recognition stopped');
+  console.log('Transcription stopped');
 }
