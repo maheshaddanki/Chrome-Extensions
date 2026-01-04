@@ -1,6 +1,7 @@
 // Offscreen document for speech recognition
 let recognition = null;
 let mediaStream = null;
+let audioContext = null;
 let isRecognizing = false;
 
 // Listen for messages from background script
@@ -16,6 +17,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function startRecognition(streamId, settings) {
   try {
+    console.log('Starting recognition with streamId:', streamId);
+
     // Get media stream from tab capture
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -26,7 +29,24 @@ async function startRecognition(streamId, settings) {
       }
     });
 
+    console.log('Media stream obtained:', mediaStream);
+
+    // Create audio context to keep the stream active
+    audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(mediaStream);
+
+    // Create a destination to keep audio playing (needed for speech recognition to work)
+    const destination = audioContext.createMediaStreamDestination();
+    source.connect(destination);
+
+    // Also connect to speakers so user can hear the audio
+    source.connect(audioContext.destination);
+
     // Initialize Web Speech API
+    // Note: Web Speech API uses the system microphone, not the tab audio directly
+    // So we need to use a workaround - play through speakers and use mic to capture
+    // OR use the microphone directly to capture audio from speakers
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
@@ -38,6 +58,13 @@ async function startRecognition(streamId, settings) {
     recognition.interimResults = true;
     recognition.lang = settings.language || 'en-US';
     recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      console.log('Speech recognition started successfully');
+      chrome.runtime.sendMessage({
+        type: 'RECOGNITION_STARTED'
+      });
+    };
 
     recognition.onresult = (event) => {
       let interimTranscript = '';
@@ -52,6 +79,8 @@ async function startRecognition(streamId, settings) {
           interimTranscript += transcript;
         }
       }
+
+      console.log('Transcription result:', { finalTranscript, interimTranscript });
 
       // Send final results
       if (finalTranscript) {
@@ -76,18 +105,24 @@ async function startRecognition(streamId, settings) {
       console.error('Speech recognition error:', event.error);
 
       // Restart on recoverable errors
-      if (event.error === 'no-speech' || event.error === 'audio-capture') {
+      if (event.error === 'no-speech' || event.error === 'aborted') {
         if (isRecognizing) {
           setTimeout(() => {
-            if (isRecognizing) {
+            if (isRecognizing && recognition) {
               try {
                 recognition.start();
+                console.log('Restarting recognition after error:', event.error);
               } catch (e) {
-                // Ignore if already started
+                console.log('Could not restart:', e.message);
               }
             }
-          }, 100);
+          }, 500);
         }
+      } else if (event.error === 'not-allowed') {
+        chrome.runtime.sendMessage({
+          type: 'TRANSCRIPTION_ERROR',
+          error: 'Microphone access denied. Please allow microphone permission.'
+        });
       } else {
         chrome.runtime.sendMessage({
           type: 'TRANSCRIPTION_ERROR',
@@ -97,17 +132,19 @@ async function startRecognition(streamId, settings) {
     };
 
     recognition.onend = () => {
+      console.log('Speech recognition ended');
       // Restart recognition if still active
       if (isRecognizing) {
         setTimeout(() => {
           if (isRecognizing && recognition) {
             try {
               recognition.start();
+              console.log('Restarting recognition after end');
             } catch (e) {
-              // Ignore if already started
+              console.log('Could not restart after end:', e.message);
             }
           }
-        }, 100);
+        }, 300);
       }
     };
 
@@ -115,7 +152,7 @@ async function startRecognition(streamId, settings) {
     isRecognizing = true;
     recognition.start();
 
-    console.log('Speech recognition started');
+    console.log('Speech recognition initialization complete');
 
   } catch (error) {
     console.error('Failed to start recognition:', error);
@@ -127,6 +164,7 @@ async function startRecognition(streamId, settings) {
 }
 
 function stopRecognition() {
+  console.log('Stopping recognition...');
   isRecognizing = false;
 
   if (recognition) {
@@ -136,6 +174,15 @@ function stopRecognition() {
       // Ignore
     }
     recognition = null;
+  }
+
+  if (audioContext) {
+    try {
+      audioContext.close();
+    } catch (e) {
+      // Ignore
+    }
+    audioContext = null;
   }
 
   if (mediaStream) {
